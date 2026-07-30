@@ -1,0 +1,26 @@
+[package]
+name = "stratadb"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "A crash-safe embedded key-value storage engine"
+license = "MIT"
+
+[lib]
+name = "stratadb"
+path = "src/lib.rs"
+
+[[bin]]
+name = "stratadb"
+path = "src/main.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
