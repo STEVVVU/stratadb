@@ -33,6 +33,7 @@ pub fn segment_name(id: u64) -> String {
     format!("{SEGMENT_PREFIX}{id:020}{SEGMENT_SUFFIX}")
 }
 
+#[must_use]
 pub fn segment_path(directory: &Path, id: u64) -> PathBuf {
     directory.join(segment_name(id))
 }
@@ -218,6 +219,7 @@ mod tests {
         .unwrap();
         let mut file = OpenOptions::new()
             .create(true)
+            .truncate(true)
             .write(true)
             .open(&path)
             .unwrap();

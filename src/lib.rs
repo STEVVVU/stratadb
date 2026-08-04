@@ -1,8 +1,11 @@
-//! StrataDB is a crash-safe, single-writer embedded key-value engine.
+//! `StrataDB` is a crash-safe, single-writer embedded key-value engine.
 
 mod crc32;
+mod engine;
 mod error;
 pub mod format;
 pub mod wal;
 
+pub use engine::{Config, Engine, Snapshot, Stats, WriteBatch};
 pub use error::{Error, Result};
+pub use format::Operation;
