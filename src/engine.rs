@@ -1,8 +1,15 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
+
+#[cfg(not(any(unix, windows)))]
+use std::io::{Read, Seek, SeekFrom};
+#[cfg(unix)]
+use std::os::unix::fs::FileExt as _;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt as _;
 
 use crate::format::{
     encode_batch, EncodedBatch, Operation, HEADER_LEN, MAX_BATCH_OPERATIONS, MAX_RECORD_BYTES,
@@ -40,6 +47,7 @@ struct State {
     index: BTreeMap<Vec<u8>, ValueRef>,
     sequence: u64,
     segment_ids: Vec<u64>,
+    segment_files: BTreeMap<u64, Arc<File>>,
     recovered_tail_bytes: u64,
 }
 
@@ -214,6 +222,10 @@ impl Engine {
             .open(active_path)?;
         let active_len = active_file.metadata()?.len();
         let segment_ids = segments.iter().map(|(id, _)| *id).collect();
+        let segment_files = segments
+            .iter()
+            .map(|(id, path)| Ok((*id, Arc::new(File::open(path)?))))
+            .collect::<Result<BTreeMap<_, _>>>()?;
 
         Ok(Self {
             directory,
@@ -223,6 +235,7 @@ impl Engine {
                 index,
                 sequence,
                 segment_ids,
+                segment_files,
                 recovered_tail_bytes,
             }),
             writer: Mutex::new(SegmentWriter {
@@ -276,7 +289,7 @@ impl Engine {
             .index
             .get(key)
             .copied()
-            .map(|reference| read_value(&self.directory, reference))
+            .map(|reference| read_value(&state.segment_files, reference))
             .transpose()
     }
 
@@ -284,7 +297,7 @@ impl Engine {
         let state = self.state.read().expect("state lock poisoned");
         let mut entries = BTreeMap::new();
         for (key, reference) in &state.index {
-            entries.insert(key.clone(), read_value(&self.directory, *reference)?);
+            entries.insert(key.clone(), read_value(&state.segment_files, *reference)?);
         }
         Ok(Snapshot {
             sequence: state.sequence,
@@ -314,7 +327,7 @@ impl Engine {
         for (key, reference) in &state.index {
             operations.push(Operation::Put {
                 key: key.clone(),
-                value: read_value(&self.directory, *reference)?,
+                value: read_value(&state.segment_files, *reference)?,
             });
         }
 
@@ -365,6 +378,15 @@ impl Engine {
             .append(true)
             .open(&active_path)?;
         let active_len = active_file.metadata()?.len();
+        let new_segment_files = new_segment_ids
+            .iter()
+            .map(|id| {
+                Ok((
+                    *id,
+                    Arc::new(File::open(segment_path(&self.directory, *id))?),
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
         *writer = SegmentWriter {
             id: active_id,
             file: active_file,
@@ -372,6 +394,7 @@ impl Engine {
         };
         state.index = new_index;
         state.segment_ids.clone_from(&new_segment_ids);
+        state.segment_files = new_segment_files;
 
         for id in old_segment_ids {
             let path = segment_path(&self.directory, id);
@@ -407,12 +430,14 @@ impl Engine {
             .append(true)
             .open(path)?;
         file.sync_all()?;
+        let read_file = Arc::new(File::open(segment_path(&self.directory, next_id))?);
         *writer = SegmentWriter {
             id: next_id,
             file,
             len: 0,
         };
         state.segment_ids.push(next_id);
+        state.segment_files.insert(next_id, read_file);
         Ok(())
     }
 }
@@ -476,12 +501,60 @@ fn apply_written_record(
     )
 }
 
-fn read_value(directory: &Path, reference: ValueRef) -> Result<Vec<u8>> {
-    let mut file = File::open(segment_path(directory, reference.segment_id))?;
-    file.seek(SeekFrom::Start(reference.offset))?;
+fn read_value(segment_files: &BTreeMap<u64, Arc<File>>, reference: ValueRef) -> Result<Vec<u8>> {
+    let file = segment_files.get(&reference.segment_id).ok_or_else(|| {
+        Error::InvalidInput(format!(
+            "missing file handle for segment {}",
+            reference.segment_id
+        ))
+    })?;
     let mut value = vec![0_u8; usize::try_from(reference.len).expect("u32 fits usize")];
-    file.read_exact(&mut value)?;
+    read_exact_at(file, &mut value, reference.offset)?;
     Ok(value)
+}
+
+#[cfg(unix)]
+fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> Result<()> {
+    let mut read = 0_usize;
+    while read < buffer.len() {
+        let count = file.read_at(
+            &mut buffer[read..],
+            offset + u64::try_from(read).expect("buffer offset fits u64"),
+        )?;
+        if count == 0 {
+            return Err(Error::Io(std::io::Error::from(
+                std::io::ErrorKind::UnexpectedEof,
+            )));
+        }
+        read += count;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> Result<()> {
+    let mut read = 0_usize;
+    while read < buffer.len() {
+        let count = file.seek_read(
+            &mut buffer[read..],
+            offset + u64::try_from(read).expect("buffer offset fits u64"),
+        )?;
+        if count == 0 {
+            return Err(Error::Io(std::io::Error::from(
+                std::io::ErrorKind::UnexpectedEof,
+            )));
+        }
+        read += count;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> Result<()> {
+    let mut file = file.try_clone()?;
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(buffer)?;
+    Ok(())
 }
 
 fn compaction_chunks(operations: Vec<Operation>) -> Result<Vec<Vec<Operation>>> {
