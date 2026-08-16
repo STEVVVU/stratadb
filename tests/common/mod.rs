@@ -1,32 +1,29 @@
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
+use tempfile::TempDir;
+
+/// A scratch directory for one integration test, removed on drop.
+///
+/// Backed by `tempfile::TempDir`, which uses an OS-provided unique name rather
+/// than the previous timestamp-plus-pid scheme. That closes a real (if
+/// unlikely) collision window: two tests entering `new` within the same
+/// nanosecond tick in the same process would previously have shared a
+/// directory. It also removes the scratch tree even when the test panics while
+/// holding it.
 pub struct TestDirectory {
-    path: PathBuf,
+    directory: TempDir,
 }
 
 impl TestDirectory {
     pub fn new(name: &str) -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock is after Unix epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "stratadb-integration-{name}-{}-{nonce}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path).unwrap();
-        Self { path }
+        let directory = tempfile::Builder::new()
+            .prefix(&format!("stratadb-integration-{name}-"))
+            .tempdir()
+            .expect("create scratch directory");
+        Self { directory }
     }
 
     pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TestDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
+        self.directory.path()
     }
 }

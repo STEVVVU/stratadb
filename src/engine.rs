@@ -604,30 +604,23 @@ fn remove_stale_compaction_files(directory: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::TempDir;
 
     use super::{Config, Engine, WriteBatch};
 
-    fn test_directory(name: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+    fn test_directory(name: &str) -> TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("stratadb-engine-{name}-"))
+            .tempdir()
             .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "stratadb-engine-{name}-{}-{nonce}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path).unwrap();
-        path
     }
 
     #[test]
     fn put_delete_batch_snapshot_and_reopen() {
-        let directory = test_directory("roundtrip");
+        let scratch = test_directory("roundtrip");
+        let directory = scratch.path();
         {
-            let engine = Engine::open(&directory).unwrap();
+            let engine = Engine::open(directory).unwrap();
             engine.put(b"alpha", b"one").unwrap();
             let mut batch = WriteBatch::new();
             batch
@@ -642,19 +635,19 @@ mod tests {
             assert_eq!(engine.get(b"beta").unwrap(), None);
         }
         {
-            let engine = Engine::open(&directory).unwrap();
+            let engine = Engine::open(directory).unwrap();
             assert_eq!(engine.get(b"alpha").unwrap(), Some(b"two".to_vec()));
             assert_eq!(engine.get(b"beta").unwrap(), None);
         }
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
     fn rotation_and_compaction_preserve_latest_values() {
-        let directory = test_directory("compact");
+        let scratch = test_directory("compact");
+        let directory = scratch.path();
         {
             let engine = Engine::open_with_config(
-                &directory,
+                directory,
                 Config {
                     max_segment_bytes: 96,
                 },
@@ -671,9 +664,8 @@ mod tests {
             assert_eq!(engine.get(b"key").unwrap(), Some(b"value-19".to_vec()));
         }
         {
-            let engine = Engine::open(&directory).unwrap();
+            let engine = Engine::open(directory).unwrap();
             assert_eq!(engine.get(b"key").unwrap(), Some(b"value-19".to_vec()));
         }
-        fs::remove_dir_all(directory).unwrap();
     }
 }

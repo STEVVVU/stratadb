@@ -189,26 +189,17 @@ fn tail_problem(
 mod tests {
     use std::fs::{self, OpenOptions};
     use std::io::Write;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{scan_segment, TailPolicy};
     use crate::format::{encode_batch, Operation};
 
-    fn test_path(name: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory =
-            std::env::temp_dir().join(format!("stratadb-format-{}-{nonce}", std::process::id()));
-        fs::create_dir_all(&directory).unwrap();
-        directory.join(name)
-    }
-
     #[test]
     fn repair_discards_only_incomplete_tail() {
-        let path = test_path("segment.wal");
+        let directory = tempfile::Builder::new()
+            .prefix("stratadb-format-")
+            .tempdir()
+            .unwrap();
+        let path = directory.path().join("segment.wal");
         let record = encode_batch(
             1,
             &[Operation::Put {
@@ -236,6 +227,5 @@ mod tests {
             fs::metadata(&path).unwrap().len(),
             record.bytes.len() as u64
         );
-        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }
