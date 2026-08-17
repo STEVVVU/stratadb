@@ -22,6 +22,7 @@
 ///
 /// This is the accelerated production implementation. It is byte-for-byte
 /// equivalent to [`reference::checksum`].
+#[must_use]
 pub fn checksum(parts: &[&[u8]]) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
     for part in parts {
@@ -42,6 +43,7 @@ pub mod reference {
     const POLYNOMIAL: u32 = 0xedb8_8320;
 
     /// Computes the CRC-32 of `parts` treated as one contiguous byte sequence.
+    #[must_use]
     pub fn checksum(parts: &[&[u8]]) -> u32 {
         let mut crc = u32::MAX;
         for part in parts {
