@@ -7,6 +7,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   quality:
     name: Quality (${{ matrix.os }})
@@ -19,6 +22,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all-targets
@@ -31,11 +35,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.89"
-      - run: cargo test --all-targets
+      - uses: Swatinem/rust-cache@v2
+      # Only the library and its tests are held to the MSRV. Benchmarks are
+      # excluded on purpose: criterion 0.7 requires 1.80 and redb 2.6 requires
+      # 1.85, both under the 1.89 pin, but pulling the full bench dependency
+      # tree into the MSRV job would make an unrelated dev-dependency bump able
+      # to fail it. The benchmark job below builds them on stable instead.
+      - run: cargo test --lib --bins --tests
 
-  benchmark-smoke:
+  benchmarks:
+    name: Benchmarks compile and smoke-run
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Compile both benchmark targets, including the redb/sled comparison, so a
+      # broken benchmark fails CI. They are not *run* to completion here: the
+      # suite is fsync-bound and takes many minutes, and shared CI runners have
+      # far too much timing noise for the numbers to mean anything. Published
+      # figures come from a known local machine and are checked into benchmarks/.
+      - run: cargo bench --no-run
+      - run: cargo bench --features compare --bench comparison --no-run
+      - run: cargo clippy --all-targets --features compare -- -D warnings
+      # One very short real run of each target, to prove the harness executes
+      # rather than just type-checks.
+      - run: cargo bench --bench engine -- --test
+      - run: cargo bench --features compare --bench comparison -- --test
+      # End-to-end CLI workload, which also validates recovery correctness.
       - run: cargo run --release -- bench target/ci-bench 1000 128 42

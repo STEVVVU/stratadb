@@ -26,6 +26,14 @@ initial value `0xFFFFFFFF`, and final XOR `0xFFFFFFFF`. It covers header bytes
 `4..24` followed by the complete payload. Magic and the stored checksum are
 not included.
 
+This parameterization is the format contract and is independent of which
+implementation computes it. `crc32::checksum` (backed by `crc32fast`, hardware
+accelerated) is used at runtime; `crc32::reference` is the original bitwise
+implementation, retained as executable documentation of the definition above. A
+differential test asserts the two agree bit-for-bit, and separate known-answer
+vectors generated with Python's `zlib.crc32` pin both to this specification.
+Segments written by either implementation are byte-identical and interchangeable.
+
 ## Operation encoding
 
 Operations are concatenated without padding:

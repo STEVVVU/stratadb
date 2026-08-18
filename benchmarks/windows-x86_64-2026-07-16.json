@@ -20,5 +20,7 @@
   "segments_after_compaction": 1,
   "keys_verified_after_reopen": 10000,
   "read_checksum": 1271738,
-  "notes": "Single local run; includes fdatasync-equivalent per 100-operation batch; excludes process startup and release compilation."
+  "notes": "Single local run; includes fdatasync-equivalent per 100-operation batch; excludes process startup and release compilation.",
+  "superseded_by": "windows-x86_64-2026-07-28.json",
+  "superseded_note": "SUPERSEDED and retained only for history. This was a SINGLE run, so its write_operations_per_second (18397.57) and point_reads_per_second (117113.30) are not comparable to the 11-run medians in the 2026-07-28 artifact; both fall outside that run's min/max envelope. Do not quote these figures. read_checksum (1271738) is identical in both, so the workload itself is unchanged."
 }

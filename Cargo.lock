@@ -628,8 +628,6 @@ dependencies = [
  "crc32fast",
  "criterion",
  "redb",
- "serde",
- "serde_json",
  "sled",
  "tempfile",
  "thiserror",

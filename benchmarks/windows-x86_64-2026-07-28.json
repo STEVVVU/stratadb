@@ -1,0 +1,59 @@
+{
+  "artifact_version": 2,
+  "measured_at": "2026-07-28",
+  "command": "cargo run --release -- bench .tmp/bench <n> 10000 256 42",
+  "rustc": "1.96.0 (ac68faa20 2026-05-25)",
+  "benchmark": "seeded-batched-durable-writes",
+  "os": "windows",
+  "arch": "x86_64",
+  "hardware": {
+    "cpu": "Intel Core Ultra 7 265U",
+    "cores_threads": "12/14",
+    "ram_gb": 31.4,
+    "storage": "Samsung MZVL2512HCJQ-00BH1 NVMe SSD",
+    "os_build": "Windows 11 Enterprise 26200"
+  },
+  "operations": 10000,
+  "value_bytes": 256,
+  "batch_size": 100,
+  "seed": 42,
+  "runs": 11,
+  "read_checksum": 1271738,
+  "results": {
+    "write_operations_per_second": {
+      "median": 32073.83,
+      "min": 28804.27,
+      "max": 34743.45
+    },
+    "point_reads_per_second": {
+      "median": 42491.46,
+      "min": 28927.52,
+      "max": 86933.99
+    },
+    "snapshot_seconds": {
+      "median": 0.11,
+      "min": 0.06,
+      "max": 0.21
+    },
+    "compaction_seconds": {
+      "median": 0.18,
+      "min": 0.11,
+      "max": 0.37
+    },
+    "reopen_recovery_seconds": {
+      "median": 0.06,
+      "min": 0.02,
+      "max": 0.24
+    }
+  },
+  "segments_after_compaction": 1,
+  "keys_verified_after_reopen": 10000,
+  "notes": [
+    "Supersedes windows-x86_64-2026-07-16.json, which reported a SINGLE run and is therefore not comparable to these medians.",
+    "11 consecutive runs, each into a fresh empty directory. read_checksum was identical (1271738) in every run, so the workload is confirmed byte-identical across runs and across the crc32fast change.",
+    "Spread is large on this machine: point reads ranged 28.9K-86.9K/s, a 3x span, and the timed phases span 2-4x. This is a power-managed laptop CPU with no pinned clocks; treat the min/max as the honest measurement envelope and the median as the point estimate. Do not quote the max.",
+    "The 2026-07-16 artifact's 18.4K writes/s and 117K reads/s were a single observation; the write figure sits below this run's minimum and the read figure above its maximum. That is measurement noise plus a different machine state, NOT a demonstrated regression or improvement from the crc32fast swap.",
+    "Includes an fdatasync-equivalent per 100-operation batch. Excludes process startup and release compilation.",
+    "For statistically meaningful per-operation numbers prefer the criterion suite: cargo bench --bench engine."
+  ]
+}

@@ -28,10 +28,14 @@ crc32fast = "1.5.0"
 # Derives Display/Error for the public error enum. Message text is pinned by
 # the `#[error(...)]` attributes so the wire-visible strings did not change.
 thiserror = "2.0.17"
-# The benchmark report artifact in `benchmarks/` is a versioned machine-readable
-# schema; it is serialized from a struct rather than hand-printed.
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
+# NOTE: serde is deliberately NOT a dependency. The only serialization boundary
+# in this crate is the CLI `bench` subcommand's JSON report, which is a handful
+# of printlns over a flat set of scalars. Adding serde + serde_json to replace
+# that would pull in a proc-macro dependency chain to save a few lines, with no
+# gain in type safety at the boundary that matters (the on-disk WAL format is
+# hand-rolled binary and must stay that way). Revisit only if a real structured
+# config or an export/import format lands.
+#
 # Comparison-only engines, pulled in by `--features compare`. Both are pure
 # Rust, so the comparison build works on Windows/MSVC with no C++ toolchain
 # (unlike `librocksdb-sys`). They are unused by the library itself.
