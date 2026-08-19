@@ -99,3 +99,19 @@ are serialized, and SQLite-style page management is intentionally absent.
 Future growth points are a block cache, sparse/multi-level index, range
 iterators, background compaction, and a manifest with explicit directory-sync
 protocols.
+
+Two of these are load-bearing rather than nice-to-have, and benchmarking against
+redb and sled quantified both:
+
+- **No block cache and no zero-copy read.** Every `get` costs a positional-read
+  syscall plus a fresh allocation. Measured at roughly 11x slower than sled on
+  random point reads. The index itself is not the bottleneck: a miss, which stops
+  after the `BTreeMap` lookup, is about 28x faster than a hit.
+- **No checkpoint or on-disk index.** Startup is O(bytes on disk) because the
+  entire WAL is replayed and every CRC re-verified. Measured at roughly 50x
+  slower than redb to open a 50,000-key database, and the ratio grows with size.
+
+These are the price of the write path above: appends stay cheap precisely because
+index construction is deferred to startup and no page structure is maintained on
+disk. Memory mapping was measured as a fix for the first and rejected; see the
+failure model for why truncation-based tail repair forecloses it.

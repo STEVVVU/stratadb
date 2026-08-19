@@ -63,6 +63,36 @@ loss can expose filesystem-specific metadata outcomes even when process-crash
 tests pass. A production hardening step is a manifest protocol plus portable
 directory synchronization.
 
+## Why the read path does not use memory mapping
+
+Tail repair requires shrinking the active segment: `wal.rs` calls
+`set_len(valid_end)` on the first invalid record. That requirement rules out
+memory-mapping segment files for reads, independent of performance.
+
+Measured on Windows, truncating a file with a live mapping is refused outright:
+
+```
+The requested operation cannot be performed on a file with a user-mapped
+section open. (os error 1224)
+```
+
+On platforms that do permit the truncation, the situation is worse rather than
+better: the mapped pages beyond the new end are unmapped, and reading them is
+undefined behavior — `SIGBUS` or an access violation, not a `Result` this crate
+could surface as `Error::Corruption`. A recovery path that can abort the process
+instead of returning a corruption error would defeat the purpose of the strict
+and repair policies above.
+
+Memory mapping was benchmarked and is genuinely faster for reads (roughly 19x
+for a drop-in replacement, more with a borrowed-slice API; see the README). It
+is not adopted because deterministic tail repair is the stronger guarantee, and
+because `Mmap::map` is `unsafe` on a soundness condition — that no other process
+truncates the file — that this crate cannot enforce for an ordinary directory.
+`unsafe_code = "forbid"` therefore stays in place.
+
+A user-space block cache would recapture much of the read benefit without
+touching either property. It is not implemented.
+
 ## Excluded failures
 
 - Hardware or filesystem behavior that violates successful sync/rename
