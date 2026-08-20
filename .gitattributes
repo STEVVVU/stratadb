@@ -1,0 +1,36 @@
+# Normalize line endings for every text file in the repository.
+#
+# Without this, the repo's line endings depend on each contributor's
+# `core.autocrlf` setting. This checkout happens to have `core.autocrlf=input`,
+# so it produced LF blobs — but that is a local setting, not a property of the
+# repository, and a contributor with the Windows default (`autocrlf=true`) would
+# commit CRLF into files that must not have it.
+#
+# It matters concretely here for two reasons:
+#
+#   1. The `benchmarks/*.json` artifacts are committed evidence and are diffed
+#      across runs and machines. A CRLF flip would show every line as changed and
+#      bury the numbers that actually moved. The `bench --out` flag writes LF
+#      explicitly for the same reason.
+#   2. `cargo fmt --check` and the on-disk format tests are byte-sensitive; CRLF
+#      creeping into a source file is an avoidable CI failure.
+#
+# `text=auto` would let git guess per file. `text eol=lf` is deliberate instead:
+# every text file in this repo is LF, on every platform, with no guessing.
+* text eol=lf
+
+# Explicit binary marking, so git never attempts EOL conversion or a textual
+# diff on these. None are committed today; these entries exist so that adding a
+# corrupted-segment fixture or an image cannot silently be mangled on checkout,
+# which is exactly the failure mode this file is here to prevent.
+*.wal   binary
+*.bin   binary
+*.png   binary
+*.jpg   binary
+*.gz    binary
+*.zip   binary
+*.pdf   binary
+
+# Rust/Cargo generated lockfile is text and must stay LF; called out explicitly
+# because it is machine-written and would otherwise be easy to overlook.
+Cargo.lock text eol=lf
