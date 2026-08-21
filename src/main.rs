@@ -86,8 +86,9 @@ fn run() -> Result<()> {
             let operations = optional_usize(&mut arguments, 10_000, "operations")?;
             let value_bytes = optional_usize(&mut arguments, 256, "value bytes")?;
             let seed = optional_u64(&mut arguments, 42, "seed")?;
+            let output = optional_out_path(&mut arguments)?;
             no_more_arguments(&mut arguments)?;
-            benchmark(&directory, operations, value_bytes, seed)?;
+            benchmark(&directory, operations, value_bytes, seed, output.as_deref())?;
         }
         "help" | "--help" | "-h" => print_usage(),
         _ => return Err(usage(&format!("unknown command {command:?}"))),
@@ -127,8 +128,24 @@ fn inspect(directory: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Runs the end-to-end workload and emits the JSON report.
+///
+/// If `output` is `Some`, the report is written to that path with explicit `\n`
+/// line endings and no BOM, and only a one-line confirmation goes to stdout.
+/// Otherwise the report is printed to stdout as before.
+///
+/// The `--out` path exists because redirecting stdout is not portable for this
+/// artifact: PowerShell 5.1's `>` and `Tee-Object` encode as UTF-16LE with a BOM,
+/// which produces a committed "JSON" file that no JSON parser will read. Writing
+/// the bytes here removes the shell from the encoding decision entirely.
 #[allow(clippy::too_many_lines)]
-fn benchmark(directory: &Path, operations: usize, value_bytes: usize, seed: u64) -> Result<()> {
+fn benchmark(
+    directory: &Path,
+    operations: usize,
+    value_bytes: usize,
+    seed: u64,
+    output: Option<&Path>,
+) -> Result<()> {
     if operations == 0 {
         return Err(Error::InvalidInput(
             "benchmark operations must be positive".to_owned(),
@@ -205,37 +222,46 @@ fn benchmark(directory: &Path, operations: usize, value_bytes: usize, seed: u64)
         ));
     }
 
-    println!("{{");
-    println!("  \"benchmark\": \"seeded-batched-durable-writes\",");
-    println!("  \"os\": \"{}\",", env::consts::OS);
-    println!("  \"arch\": \"{}\",", env::consts::ARCH);
-    println!("  \"operations\": {operations},");
-    println!("  \"value_bytes\": {value_bytes},");
-    println!("  \"batch_size\": {BENCH_BATCH_SIZE},");
-    println!("  \"seed\": {seed},");
-    println!("  \"write_seconds\": {write_seconds:.6},");
-    println!(
-        "  \"write_operations_per_second\": {:.2},",
-        reporting_count / write_seconds
+    // Built as one string rather than printed line by line so the identical
+    // bytes can go either to stdout or to a file. `\n` is written explicitly:
+    // this artifact is committed and compared across platforms, so the line
+    // ending must not depend on the host or the shell.
+    let report = format!(
+        "{{\n\
+         \x20 \"benchmark\": \"seeded-batched-durable-writes\",\n\
+         \x20 \"os\": \"{os}\",\n\
+         \x20 \"arch\": \"{arch}\",\n\
+         \x20 \"operations\": {operations},\n\
+         \x20 \"value_bytes\": {value_bytes},\n\
+         \x20 \"batch_size\": {BENCH_BATCH_SIZE},\n\
+         \x20 \"seed\": {seed},\n\
+         \x20 \"write_seconds\": {write_seconds:.6},\n\
+         \x20 \"write_operations_per_second\": {writes_per_second:.2},\n\
+         \x20 \"read_seconds\": {read_seconds:.6},\n\
+         \x20 \"point_reads_per_second\": {reads_per_second:.2},\n\
+         \x20 \"snapshot_seconds\": {snapshot_seconds:.6},\n\
+         \x20 \"compaction_seconds\": {compact_seconds:.6},\n\
+         \x20 \"reopen_recovery_seconds\": {reopen_seconds:.6},\n\
+         \x20 \"segments_after_compaction\": {segments},\n\
+         \x20 \"keys_verified_after_reopen\": {keys},\n\
+         \x20 \"read_checksum\": {read_checksum}\n\
+         }}\n",
+        os = env::consts::OS,
+        arch = env::consts::ARCH,
+        writes_per_second = reporting_count / write_seconds,
+        reads_per_second = reporting_count / read_seconds,
+        segments = reopened_stats.segment_count,
+        keys = reopened_stats.key_count,
     );
-    println!("  \"read_seconds\": {read_seconds:.6},");
-    println!(
-        "  \"point_reads_per_second\": {:.2},",
-        reporting_count / read_seconds
-    );
-    println!("  \"snapshot_seconds\": {snapshot_seconds:.6},");
-    println!("  \"compaction_seconds\": {compact_seconds:.6},");
-    println!("  \"reopen_recovery_seconds\": {reopen_seconds:.6},");
-    println!(
-        "  \"segments_after_compaction\": {},",
-        reopened_stats.segment_count
-    );
-    println!(
-        "  \"keys_verified_after_reopen\": {},",
-        reopened_stats.key_count
-    );
-    println!("  \"read_checksum\": {read_checksum}");
-    println!("}}");
+
+    if let Some(path) = output {
+        // `write` on the raw bytes, not `println!` into a redirect: this is the
+        // whole point of the flag. No BOM, LF endings, UTF-8.
+        fs::write(path, report.as_bytes())?;
+        println!("wrote {}", path.display());
+    } else {
+        print!("{report}");
+    }
     Ok(())
 }
 
@@ -313,6 +339,22 @@ fn optional_u64(
     })
 }
 
+/// Parses an optional trailing `--out <path>` for the `bench` subcommand.
+///
+/// Returns `Ok(None)` when the next argument is absent, so `bench` keeps its
+/// existing positional-only form. A bare `--out` with no path, or any other
+/// unrecognized trailing token, is a usage error rather than being ignored.
+fn optional_out_path(arguments: &mut impl Iterator<Item = String>) -> Result<Option<PathBuf>> {
+    match arguments.next() {
+        None => Ok(None),
+        Some(flag) if flag == "--out" => {
+            let path = path_argument(arguments, "--out path")?;
+            Ok(Some(path))
+        }
+        Some(other) => Err(usage(&format!("unexpected argument {other:?}"))),
+    }
+}
+
 fn no_more_arguments(arguments: &mut impl Iterator<Item = String>) -> Result<()> {
     if let Some(argument) = arguments.next() {
         return Err(usage(&format!("unexpected argument {argument:?}")));
@@ -337,6 +379,10 @@ Usage:
   stratadb compact <directory>
   stratadb inspect <directory>
   stratadb repair <directory>
-  stratadb bench <new-directory> [operations] [value-bytes] [seed]"
+  stratadb bench <new-directory> [operations] [value-bytes] [seed] [--out <file>]
+
+`bench` prints its JSON report to stdout. Prefer `--out <file>` when capturing it
+to disk: PowerShell 5.1 redirects (`>`, `Tee-Object`) write UTF-16LE with a BOM,
+which no JSON parser will read. `--out` writes UTF-8 with LF endings."
     );
 }
