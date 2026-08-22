@@ -9,6 +9,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # `cargo test` exits 0 when it discovers nothing, so a refactor that stopped
+  # tests being collected would leave CI green while testing nothing. Assert the
+  # count instead. This is a floor, not an exact count: raise it when tests are
+  # added, never lower it to make a red build pass.
+  MIN_TESTS: 18
 
 jobs:
   quality:
@@ -24,8 +29,35 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --all-targets
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --all-targets
+
+      # Guard against a vacuous pass: sum the tests that actually reported a
+      # result and fail if the suite shrank below the floor. The step above
+      # would exit 0 on "0 passed", which is exactly how a silently-empty
+      # suite stays green.
+      #
+      # This guard was negative-tested before being committed, because a guard
+      # never observed to fail is not known to work:
+      #   - deleting the 5 tests in tests/recovery.rs  -> saw 13, exit 1
+      #   - gating the 11 `#[cfg(test)]` modules in src/ behind an off-by-default
+      #     feature (i.e. tests silently not discovered, the real failure mode)
+      #     -> saw 7, exit 1, while bare `cargo test` still exited 0 reporting
+      #     "test result: ok. 0 passed" for the lib target
+      # Both were restored afterwards; the floor of 18 is the current count.
+      - name: Assert the suite is not empty
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Summed with awk, not bc: bc is not installed on the Windows runner.
+          total=$(cargo test --locked --all-targets 2>&1 \
+            | awk '/^test result: ok\./ { sum += $4 } END { print sum + 0 }')
+          echo "tests passed: ${total} (floor: ${MIN_TESTS})"
+          if [ "${total}" -lt "${MIN_TESTS}" ]; then
+            echo "::error::Expected at least ${MIN_TESTS} passing tests, saw ${total}." \
+                 "Either tests were removed or they stopped being discovered."
+            exit 1
+          fi
 
   msrv:
     name: Rust 1.89
@@ -41,7 +73,27 @@ jobs:
       # 1.85, both under the 1.89 pin, but pulling the full bench dependency
       # tree into the MSRV job would make an unrelated dev-dependency bump able
       # to fail it. The benchmark job below builds them on stable instead.
+      #
+      # `--locked` is deliberately omitted in this job only: Cargo.lock is
+      # resolved by the stable toolchain, and an MSRV job that must not update it
+      # would fail on lockfile churn rather than on a real MSRV break.
       - run: cargo test --lib --bins --tests
+
+      # Same vacuous-pass guard as the quality job. The target set differs
+      # (benches excluded) but the count does not: the bench targets contribute
+      # no `#[test]` functions, so the same floor applies to both.
+      - name: Assert the suite is not empty
+        shell: bash
+        run: |
+          set -euo pipefail
+          total=$(cargo test --lib --bins --tests 2>&1 \
+            | awk '/^test result: ok\./ { sum += $4 } END { print sum + 0 }')
+          echo "tests passed: ${total} (floor: ${MIN_TESTS})"
+          if [ "${total}" -lt "${MIN_TESTS}" ]; then
+            echo "::error::Expected at least ${MIN_TESTS} passing tests, saw ${total}." \
+                 "Either tests were removed or they stopped being discovered."
+            exit 1
+          fi
 
   benchmarks:
     name: Benchmarks compile and smoke-run
@@ -55,12 +107,14 @@ jobs:
       # suite is fsync-bound and takes many minutes, and shared CI runners have
       # far too much timing noise for the numbers to mean anything. Published
       # figures come from a known local machine and are checked into benchmarks/.
-      - run: cargo bench --no-run
-      - run: cargo bench --features compare --bench comparison --no-run
-      - run: cargo clippy --all-targets --features compare -- -D warnings
+      - run: cargo bench --locked --no-run
+      - run: cargo bench --locked --features compare --bench comparison --no-run
+      - run: cargo clippy --locked --all-targets --features compare -- -D warnings
       # One very short real run of each target, to prove the harness executes
       # rather than just type-checks.
-      - run: cargo bench --bench engine -- --test
-      - run: cargo bench --features compare --bench comparison -- --test
+      - run: cargo bench --locked --bench engine -- --test
+      - run: cargo bench --locked --features compare --bench comparison -- --test
       # End-to-end CLI workload, which also validates recovery correctness.
-      - run: cargo run --release -- bench target/ci-bench 1000 128 42
+      # `--out` is used rather than a shell redirect on purpose; see the note in
+      # the README's "CLI end-to-end workload" section.
+      - run: cargo run --locked --release -- bench target/ci-bench 1000 128 42 --out target/ci-bench.json
