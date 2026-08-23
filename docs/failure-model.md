@@ -83,15 +83,23 @@ could surface as `Error::Corruption`. A recovery path that can abort the process
 instead of returning a corruption error would defeat the purpose of the strict
 and repair policies above.
 
-Memory mapping was benchmarked and is genuinely faster for reads (roughly 19x
-for a drop-in replacement, more with a borrowed-slice API; see the README). It
-is not adopted because deterministic tail repair is the stronger guarantee, and
-because `Mmap::map` is `unsafe` on a soundness condition — that no other process
-truncates the file — that this crate cannot enforce for an ordinary directory.
-`unsafe_code = "forbid"` therefore stays in place.
+Memory mapping was evaluated for the read path and rejected. The rejection rests
+on the two properties above and not on any timing figure: deterministic tail
+repair is the stronger guarantee, and `Mmap::map` is `unsafe` on a soundness
+condition — that no other process truncates the file — that this crate cannot
+enforce for an ordinary directory. `unsafe_code = "forbid"` therefore stays in
+place.
 
-A user-space block cache would recapture much of the read benefit without
-touching either property. It is not implemented.
+A previous revision of this file quoted "roughly 19x" for a drop-in mmap read
+path. That figure came from a probe that was never committed and does not
+reproduce, so it is **withdrawn**. What is committed instead is the
+`read/path-decomposition` group in `benches/engine.rs`, which shows the
+positional-read syscall to be worth ~9x (median of 11 runs) — the same
+qualitative conclusion, at a smaller and reproducible magnitude. See the README
+for the full table and for what that benchmark does and does not measure.
+
+A user-space block cache would recapture that benefit without touching either
+property, and needs no `unsafe`. It is not implemented.
 
 ## Excluded failures
 

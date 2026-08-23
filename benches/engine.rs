@@ -29,6 +29,7 @@
 
 mod support;
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
@@ -225,6 +226,190 @@ fn point_reads(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// Decomposes a point read into syscall cost, allocation cost, and index cost.
+///
+/// ## Why this benchmark exists
+///
+/// The comparison suite shows point reads losing ~11x to sled, and the
+/// explanation offered for that loss is "each hit costs a `seek_read` syscall
+/// plus a fresh `Vec` allocation, and redb/sled pay neither on a cache hit."
+/// That is a causal claim about where the time goes, so it needs a measurement
+/// that separates those costs rather than an assertion.
+///
+/// An earlier revision of the README justified the same claim with an mmap probe
+/// that was never committed and cannot be reproduced; those figures have been
+/// withdrawn. This group replaces them with something a reader can run, and it
+/// deliberately measures the decomposition using **only safe code and no new
+/// dependency**:
+///
+/// - `current` — the shipped `Engine::get`: index lookup, positional read
+///   syscall, fresh `Vec<u8>` per value. The baseline.
+/// - `reused-buffer` — same index lookup and same positional read syscall, but
+///   into one pre-allocated buffer. The delta against `current` is the value
+///   allocation and nothing else.
+/// - `cached-copy` — value copied out of an in-process byte image of the segment
+///   into a fresh `Vec`. No syscall; still allocates. This is what a user-space
+///   block cache would cost on a hit.
+/// - `cached-borrow` — the same in-process image, returning a borrowed `&[u8]`.
+///   No syscall and no allocation: the floor for this index and this key order.
+///
+/// ## What this does and does not measure
+///
+/// The two `cached-*` variants hold the whole segment set in an ordinary
+/// `Vec<u8>`, which is a *stand-in* for a block cache, not for mmap. It shares
+/// mmap's property of removing the read syscall, but not mmap's demand paging or
+/// its avoidance of a userspace copy of the file. So `cached-borrow` bounds what
+/// removing the syscall and the allocation can buy on fully-resident data; it is
+/// not a measurement of `memmap2`, and it is not quoted as one. It is also an
+/// upper bound in the other direction: a real block cache has to pay for
+/// residency accounting and eviction, which this does not.
+///
+/// The index used by the three non-`current` variants is rebuilt here from the
+/// public `wal::scan_segment` output using the same offset arithmetic the engine
+/// uses at recovery, so all four variants resolve the same key to the same bytes.
+fn read_path_decomposition(criterion: &mut Criterion) {
+    use stratadb::format::HEADER_LEN;
+    use stratadb::wal::{list_segments, scan_segment, TailPolicy};
+
+    /// Absolute location of one value payload within a segment.
+    #[derive(Clone, Copy)]
+    struct Located {
+        segment_id: u64,
+        offset: u64,
+        len: usize,
+    }
+
+    const KEYS: usize = 20_000;
+
+    let directory = scratch();
+    let engine = populate(directory.path(), KEYS);
+
+    // Rebuild a key -> value-location index from the committed segments, using
+    // the same arithmetic as `Engine`'s recovery path: a value lives at the
+    // record offset, past the fixed header, plus the payload-relative offset the
+    // encoder recorded.
+    let segments = list_segments(directory.path()).expect("list segments");
+    let mut index: BTreeMap<Vec<u8>, Located> = BTreeMap::new();
+    let mut images: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+    for (segment_id, path) in &segments {
+        let report = scan_segment(path, TailPolicy::Strict).expect("scan segment");
+        for record in report.records {
+            for (operation, value_offset) in record
+                .batch
+                .operations
+                .iter()
+                .zip(&record.batch.value_offsets)
+            {
+                if let Some((relative, len)) = value_offset {
+                    index.insert(
+                        operation.key().to_vec(),
+                        Located {
+                            segment_id: *segment_id,
+                            offset: record.offset
+                                + u64::try_from(HEADER_LEN).expect("constant fits u64")
+                                + u64::from(*relative),
+                            len: usize::try_from(*len).expect("u32 fits usize"),
+                        },
+                    );
+                }
+            }
+        }
+        images.insert(
+            *segment_id,
+            std::fs::read(path).expect("read segment into memory"),
+        );
+    }
+    assert_eq!(index.len(), KEYS, "rebuilt index must cover every key");
+
+    // Separate read-only handles, so the positional-read variant does not share
+    // a file cursor with the engine's own cached handles.
+    let handles: BTreeMap<u64, std::fs::File> = segments
+        .iter()
+        .map(|(segment_id, path)| {
+            (
+                *segment_id,
+                std::fs::File::open(path).expect("open segment for reading"),
+            )
+        })
+        .collect();
+
+    // Same fixed random key order for all four variants, so any difference is
+    // the read strategy rather than the access pattern.
+    let random: Vec<Vec<u8>> = shuffled_indices(KEYS, SEED).into_iter().map(key).collect();
+
+    let mut group = criterion.benchmark_group("read/path-decomposition");
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_function("current", |bencher| {
+        let mut cursor = 0_usize;
+        bencher.iter(|| {
+            let found = engine.get(&random[cursor % KEYS]).expect("get");
+            cursor += 1;
+            found
+        });
+    });
+
+    group.bench_function("reused-buffer", |bencher| {
+        let mut cursor = 0_usize;
+        let mut buffer = vec![0_u8; VALUE_BYTES];
+        bencher.iter(|| {
+            let located = index[&random[cursor % KEYS]];
+            cursor += 1;
+            let file = &handles[&located.segment_id];
+            read_exact_at(file, &mut buffer[..located.len], located.offset);
+            std::hint::black_box(buffer[0])
+        });
+    });
+
+    group.bench_function("cached-copy", |bencher| {
+        let mut cursor = 0_usize;
+        bencher.iter(|| {
+            let located = index[&random[cursor % KEYS]];
+            cursor += 1;
+            let image = &images[&located.segment_id];
+            let start = usize::try_from(located.offset).expect("offset fits usize");
+            image[start..start + located.len].to_vec()
+        });
+    });
+
+    group.bench_function("cached-borrow", |bencher| {
+        let mut cursor = 0_usize;
+        bencher.iter(|| {
+            let located = index[&random[cursor % KEYS]];
+            cursor += 1;
+            let image = &images[&located.segment_id];
+            let start = usize::try_from(located.offset).expect("offset fits usize");
+            std::hint::black_box(&image[start..start + located.len])[0]
+        });
+    });
+
+    group.finish();
+}
+
+/// Positional read that does not disturb the file cursor, mirroring the
+/// `read_exact_at` helper in `src/engine.rs`.
+///
+/// Duplicated here rather than exported because it is a private implementation
+/// detail of the engine; the benchmark needs the same syscall shape to make the
+/// `current` / `reused-buffer` comparison meaningful.
+fn read_exact_at(file: &std::fs::File, buffer: &mut [u8], offset: u64) {
+    #[cfg(unix)]
+    use std::os::unix::fs::FileExt as _;
+    #[cfg(windows)]
+    use std::os::windows::fs::FileExt as _;
+
+    let mut read = 0_usize;
+    while read < buffer.len() {
+        let at = offset + u64::try_from(read).expect("buffer offset fits u64");
+        #[cfg(windows)]
+        let count = file.seek_read(&mut buffer[read..], at).expect("seek_read");
+        #[cfg(unix)]
+        let count = file.read_at(&mut buffer[read..], at).expect("read_at");
+        assert!(count > 0, "unexpected end of segment while reading a value");
+        read += count;
+    }
+}
+
 /// Full snapshot materialization.
 ///
 /// `snapshot` copies every live value into an immutable map, so its cost scales
@@ -393,6 +578,7 @@ criterion_group!(
     single_writes,
     batch_writes,
     point_reads,
+    read_path_decomposition,
     snapshots,
     compaction,
     recovery,
