@@ -54,6 +54,7 @@
     "Spread is large on this machine: point reads ranged 28.9K-86.9K/s, a 3x span, and the timed phases span 2-4x. This is a power-managed laptop CPU with no pinned clocks; treat the min/max as the honest measurement envelope and the median as the point estimate. Do not quote the max.",
     "The 2026-07-16 artifact's 18.4K writes/s and 117K reads/s were a single observation; the write figure sits below this run's minimum and the read figure above its maximum. That is measurement noise plus a different machine state, NOT a demonstrated regression or improvement from the crc32fast swap.",
     "Includes an fdatasync-equivalent per 100-operation batch. Excludes process startup and release compilation.",
-    "For statistically meaningful per-operation numbers prefer the criterion suite: cargo bench --bench engine."
+    "For statistically meaningful per-operation numbers prefer the criterion suite: cargo bench --bench engine.",
+    "The 'command' field above records what was actually run for this artifact. To reproduce it, prefer the '--out <file>' flag added 2026-07-29 over a shell redirect: PowerShell 5.1's '>' and Tee-Object encode as UTF-16LE with a BOM, which would make this file unparseable. '--out' writes UTF-8 with LF endings."
   ]
 }

@@ -103,15 +103,24 @@ protocols.
 Two of these are load-bearing rather than nice-to-have, and benchmarking against
 redb and sled quantified both:
 
-- **No block cache and no zero-copy read.** Every `get` costs a positional-read
-  syscall plus a fresh allocation. Measured at roughly 11x slower than sled on
-  random point reads. The index itself is not the bottleneck: a miss, which stops
-  after the `BTreeMap` lookup, is about 28x faster than a hit.
+- **No block cache.** Every `get` costs a positional-read syscall plus a fresh
+  allocation. Measured at roughly 11x slower than sled on random point reads
+  (interval-derived range 8.6-13.5x). The index itself is not the bottleneck: a
+  miss, which stops after the `BTreeMap` lookup, is roughly 20-35x faster than a
+  hit (~28x at the point estimates).
+
+  Of the two costs after the lookup, the **syscall is the one that matters.** The
+  `read/path-decomposition` benchmark measures ~9x for removing it (median of 11
+  runs, improved in all 11) and finds removing the per-value allocation
+  indistinguishable from noise (1.05x, range straddling 1.0x). So a block cache is
+  the fix, and a zero-copy read API is a ~1.3x refinement on top rather than a
+  co-equal cause — earlier revisions of these docs listed the two together.
 - **No checkpoint or on-disk index.** Startup is O(bytes on disk) because the
   entire WAL is replayed and every CRC re-verified. Measured at roughly 50x
-  slower than redb to open a 50,000-key database, and the ratio grows with size.
+  slower than redb to open a 50,000-key database (range 34-65x), and the ratio
+  grows with size.
 
 These are the price of the write path above: appends stay cheap precisely because
 index construction is deferred to startup and no page structure is maintained on
-disk. Memory mapping was measured as a fix for the first and rejected; see the
+disk. Memory mapping was evaluated as a fix for the first and rejected; see the
 failure model for why truncation-based tail repair forecloses it.

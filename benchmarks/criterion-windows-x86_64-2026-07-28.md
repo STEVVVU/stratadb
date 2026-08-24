@@ -62,14 +62,59 @@ appending. Callers who need throughput must batch.
 | `read/point/hit/random` | 16.338 µs / 18.386 µs / 20.686 µs | 54 Kelem/s |
 | `read/point/miss` | 567.75 ns / 661.96 ns / 760.49 ns | 1.51 Melem/s |
 
-A miss is ~28x faster than a random hit, and a miss does no I/O at all — it is
-the `BTreeMap` lookup and nothing else. So roughly 96% of a point read is the
-positional read plus the value allocation, and only ~4% is index lookup. That
-ratio is what motivated the mmap experiment described in the README; see there
-for why mmap was measured, found faster, and still not adopted.
+A miss is ~28x faster than a random hit (interval-derived range 21-36x), and a
+miss does no I/O at all — it is the `BTreeMap` lookup and nothing else. So the
+large majority of a point read, on the order of 95%, is the positional read rather
+than the index lookup. Which *part* of that is the syscall and which is the value
+allocation is measured separately by the `read/path-decomposition` group below;
+the short answer is that it is the syscall.
 
 Sequential hits beat random hits by ~2x, which is the OS page cache: reading keys
 in key order walks the segment file in offset order.
+
+### Read-path decomposition (added 2026-07-29)
+
+`read/point/hit/random` says a read costs ~18 µs; it does not say where that goes.
+This group splits it. Unlike every other table in this file, it is reported as a
+**median over 11 whole-process runs** with the observed min/max, because the
+between-run spread here is larger than criterion's within-run interval — the
+`reused-buffer` variant alone ranged 10.6-66.0 µs across runs.
+
+| Variant | Median | Range over 11 runs |
+| --- | ---: | --- |
+| `current` (index + `seek_read` + fresh `Vec`) | 14.67 µs | 10.82-30.73 µs |
+| `reused-buffer` (same syscall, one shared buffer) | 13.94 µs | 10.62-66.01 µs |
+| `cached-copy` (in-process bytes, fresh `Vec`) | 1.70 µs | 1.18-8.27 µs |
+| `cached-borrow` (in-process bytes, borrowed `&[u8]`) | 1.20 µs | 0.54-3.54 µs |
+
+Ratios are computed **within each run and then aggregated**, so machine-state
+drift cancels rather than widening them:
+
+| Ratio | Median | Range | Runs improving |
+| --- | ---: | --- | ---: |
+| `current` / `reused-buffer` (allocation cost) | 1.05x | 0.40-2.67x | 7 / 11 |
+| `current` / `cached-copy` (syscall cost) | **9.21x** | 1.44-21.26x | 11 / 11 |
+| `current` / `cached-borrow` (both) | **11.66x** | 4.83-27.79x | 11 / 11 |
+| `cached-copy` / `cached-borrow` (zero-copy alone) | 1.27x | 0.66-3.35x | 9 / 11 |
+
+**The syscall is the read-path cost; the allocation is not measurable.** Removing
+the syscall is worth ~9x and improved in all 11 runs. Removing the allocation
+while keeping the syscall lands at 1.05x with a range straddling 1.0x, which is
+the honest reading of "no detectable difference." That **corrects** the earlier
+explanation in this file and in the README, both of which attributed the loss to
+"a syscall plus an allocation."
+
+The `cached-*` variants keep the segments in a plain `Vec<u8>`. That stands in for
+a **block cache, not for mmap**: it removes the read syscall but has no demand
+paging, and it does not pay the eviction or residency bookkeeping a real cache
+owes. Read them as a bound on what removing the syscall can buy on fully resident
+data, and not as a measurement of `memmap2`.
+
+This group **supersedes an mmap probe** (7,878 / 415 / 36 ns, "19x" and "219x")
+that a previous revision of the README quoted. That probe was never committed and
+does not reproduce, so its numbers are withdrawn rather than carried forward. The
+qualitative conclusion it was used to support — that the syscall dominates — does
+survive, at ~9x rather than ~19x.
 
 ### Snapshots and compaction
 
@@ -114,9 +159,17 @@ checkpoint. See the comparison against redb below.
 | `crc32/reference/65536B` | 820.14 µs / 975.78 µs / 1.1449 ms | 64.1 MiB/s |
 | `encode-batch/100-ops` | 48.745 µs / 54.682 µs / 61.341 µs | 1.83 Melem/s |
 
-`crc32fast` is **~95x faster at 256 B and ~190x faster at 64 KiB** than the
-bitwise reference implementation (13.17 GiB/s vs 80.7 MiB/s at 4 KiB). The
-reference processes one bit at a time with no lookup table; `crc32fast` uses
+`crc32fast` is roughly **two orders of magnitude faster** than the bitwise
+reference implementation (13.17 GiB/s vs 80.7 MiB/s at 4 KiB). Both rows are
+themselves intervals, so the ratio is a range, not a point:
+
+| Size | Ratio (point est.) | Range from both intervals |
+| ---: | ---: | --- |
+| 256 B | ~95x | 71-125x |
+| 4 KiB | ~167x | 125-222x |
+| 64 KiB | ~192x | 147-245x |
+
+The reference processes one bit at a time with no lookup table; `crc32fast` uses
 PCLMULQDQ. Both produce identical output, enforced by the differential test in
 `src/crc32.rs`.
 
@@ -149,15 +202,18 @@ quantify what the guarantee costs.
 | redb | 1.1602 s / 1.2095 s / 1.2818 s | 248 ops/s |
 | _sled-default (not durable)_ | _9.8038 ms / 14.789 ms / 17.478 ms_ | _20,286 ops/s_ |
 
-StrataDB is fastest, ~1.2x over sled-durable and ~1.6x over redb. This is the
-expected shape and not much of a boast: an append-only log does the least
-possible work per durable write — one append, one fsync, one in-memory index
-insert. redb must maintain a copy-on-write B-tree and commit a transaction.
+StrataDB is fastest, ~1.2x over sled-durable (range 1.1-1.4x) and ~1.6x over redb
+(1.5-1.7x). Both ranges clear 1.0x, so both are real differences rather than
+overlapping intervals. This is the expected shape and not much of a boast: an
+append-only log does the least possible work per durable write — one append, one
+fsync, one in-memory index insert. redb must maintain a copy-on-write B-tree and
+commit a transaction.
 
-The `sled-default` row is the most useful number in the table: **~52x faster
-than sled-durable**, purely from not waiting for the disk. Any comparison that
-puts stock sled against a synchronously-fsyncing engine is measuring that gap
-and nothing else.
+The `sled-default` row is the most useful number in the table: roughly **50-100x
+faster than sled-durable** (point estimate ~63x; the range is wide because
+sled-default is fast enough that its own interval is proportionally large), purely
+from not waiting for the disk. Any comparison that puts stock sled against a
+synchronously-fsyncing engine is measuring that gap and nothing else.
 
 ### Batched durable writes — 5,000 ops in batches of 100
 
@@ -167,8 +223,9 @@ and nothing else.
 | redb | 267.64 ms / 276.65 ms / 290.81 ms | 18.1 Kops/s |
 | sled-durable | 311.84 ms / 333.58 ms / 353.25 ms | 15.0 Kops/s |
 
-StrataDB leads by ~1.7x over redb and ~2.1x over sled-durable. Again structural:
-a 100-operation batch is one WAL record, one append, one fsync.
+StrataDB leads by ~1.7x over redb (range 1.5-2.1x) and ~2.1x over sled-durable
+(1.8-2.5x). Again structural: a 100-operation batch is one WAL record, one append,
+one fsync.
 
 ### Random point reads — 20,000 keys, default configuration
 
@@ -178,8 +235,9 @@ a 100-operation batch is one WAL record, one append, one fsync.
 | redb | 4.6251 µs / 4.8454 µs / 5.0724 µs | 206 Kelem/s |
 | _StrataDB_ | _31.907 µs / 38.321 µs / 45.213 µs_ | _26 Kelem/s_ |
 
-**StrataDB loses badly — about 11x slower than sled and 8x slower than redb.**
-This is the headline loss and it deserves a straight explanation.
+**StrataDB loses badly — about 11x slower than sled (range 8.6-13.5x) and 8x
+slower than redb (6.3-9.8x).** This is the headline loss and it deserves a
+straight explanation.
 
 It is not the index. `read/point/miss` above shows the index lookup costs ~662 ns;
 StrataDB's problem is everything after it. Each hit issues a fresh `seek_read`
@@ -189,11 +247,11 @@ pages with no syscall, and both return borrowed or reference-counted bytes
 (`AccessGuard`, `IVec`) instead of copying into a new allocation.
 
 So StrataDB pays a syscall plus a heap allocation on *every* read, while the
-others pay neither on a cache hit. Two absent features — a block cache and a
-zero-copy read API — account for essentially the entire gap. Both are listed as
-known limits in the README, and neither is a bug; they are the cost of the
-simpler design. The mmap experiment (see README) confirms the diagnosis: removing
-just the syscall recovers ~19x.
+others pay neither on a cache hit. The `read/path-decomposition` group above
+apportions those two: **the syscall is ~9x of it and the allocation is not
+resolvable**, so a block cache is the fix and a zero-copy read API is a ~1.3x
+follow-on rather than a co-equal cause. Both are listed as known limits in the
+README, and neither is a bug; they are the cost of the simpler design.
 
 ### Opening an existing 50,000-key database
 
@@ -203,8 +261,9 @@ just the syscall recovers ~19x.
 | sled | 36.337 ms / 39.611 ms / 42.606 ms |
 | _StrataDB_ | _404.64 ms / 486.26 ms / 579.83 ms_ |
 
-**StrataDB loses by ~50x against redb and ~12x against sled, and the gap grows
-with database size.** This is the most serious structural weakness in the design.
+**StrataDB loses by ~50x against redb (range 34-65x) and ~12x against sled
+(9.5-16x), and the gap grows with database size.** This is the most serious
+structural weakness in the design.
 
 StrataDB has no checkpoint and no on-disk index. To answer the first `get` it
 must replay every record in every segment, verify every CRC, and rebuild the
@@ -220,12 +279,16 @@ plus periodic index checkpoint is the standard fix and is not implemented.
 
 ## Summary
 
+Ratio ranges are derived from both engines' intervals (slowest-over-fastest to
+fastest-over-slowest). None of them straddles 1.0x, so every row is a real
+difference at this measurement's resolution.
+
 | Axis | Winner | StrataDB's position |
 | --- | --- | --- |
-| Individual durable writes | StrataDB | 1.2x over sled-durable, 1.6x over redb |
-| Batched durable writes | StrataDB | 1.7x over redb, 2.1x over sled-durable |
-| Random point reads | sled | **~11x slower** (no block cache, no zero-copy read) |
-| Open existing database | redb | **~50x slower**, and worsens with size |
+| Individual durable writes | StrataDB | 1.2x over sled-durable (1.1-1.4), 1.6x over redb (1.5-1.7) |
+| Batched durable writes | StrataDB | 1.7x over redb (1.5-2.1), 2.1x over sled-durable (1.8-2.5) |
+| Random point reads | sled | **~11x slower** (8.6-13.5) — no block cache |
+| Open existing database | redb | **~50x slower** (34-65), and worsens with size |
 | Range scans / ordered iteration | redb, sled | **not implemented** |
 
 StrataDB wins on durable write throughput, which is what a log-structured design
