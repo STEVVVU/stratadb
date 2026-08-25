@@ -75,10 +75,19 @@ in key order walks the segment file in offset order.
 ### Read-path decomposition (added 2026-07-29)
 
 `read/point/hit/random` says a read costs ~18 µs; it does not say where that goes.
-This group splits it. Unlike every other table in this file, it is reported as a
-**median over 11 whole-process runs** with the observed min/max, because the
-between-run spread here is larger than criterion's within-run interval — the
-`reused-buffer` variant alone ranged 10.6-66.0 µs across runs.
+This group splits it, over the same 20,000-key fixture (`KEYS` in
+`read_path_decomposition`, `benches/engine.rs`). Unlike every other table in this
+file, it is reported as a **median over 11 whole-process runs** with the observed
+min/max, because the between-run spread here is larger than criterion's within-run
+interval — the `reused-buffer` variant alone ranged 10.6-66.0 µs across runs.
+
+Because a single `cargo bench` invocation cannot produce a median-of-11 or a win
+count, that aggregation has a committed producer:
+`python scripts/paired_read_decomposition.py --runs 11`. It parses each run's
+`median.point_estimate` from criterion's `estimates.json` and writes
+`benchmarks/read-path-decomposition.json`. The figures below are from an 11-run
+pass on the machine described at the top of this file and have not been
+re-measured since.
 
 | Variant | Median | Range over 11 runs |
 | --- | ---: | --- |

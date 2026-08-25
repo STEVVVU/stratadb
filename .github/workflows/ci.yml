@@ -40,7 +40,7 @@ jobs:
       # This guard was negative-tested before being committed, because a guard
       # never observed to fail is not known to work:
       #   - deleting the 5 tests in tests/recovery.rs  -> saw 13, exit 1
-      #   - gating the 11 `#[cfg(test)]` modules in src/ behind an off-by-default
+      #   - gating src/'s 5 `#[cfg(test)]` modules (11 tests) behind an off-by-default
       #     feature (i.e. tests silently not discovered, the real failure mode)
       #     -> saw 7, exit 1, while bare `cargo test` still exited 0 reporting
       #     "test result: ok. 0 passed" for the lib target

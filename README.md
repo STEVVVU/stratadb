@@ -273,9 +273,30 @@ safe code and no new dependency:
 cargo bench --bench engine -- read/path-decomposition
 ```
 
-Median of 11 runs on the machine described above, with the observed min/max
-across runs. Ratios are computed **per run and then aggregated**, so machine-state
-drift cancels instead of inflating them:
+That command measures the four variants **once**, and reports criterion's own
+within-run intervals. The table below is not that output: it is a median over 11
+whole-process runs with per-run paired ratios, because the between-run spread on
+this workload is wider than any single run's interval. That aggregation has its own
+committed driver, so the table is reproducible rather than resting on a one-off
+script:
+
+```powershell
+python scripts/paired_read_decomposition.py --runs 11
+```
+
+It runs the bench N times, reads each run's `median.point_estimate` out of
+criterion's `estimates.json`, computes the per-variant medians, the per-run paired
+ratios against `current`, the min/max envelope, and the win count out of N, then
+writes `benchmarks/read-path-decomposition.json`. It aborts rather than emitting a
+short table if a run fails, if a variant is missing, or if criterion did not
+rewrite its output.
+
+The figures below are from an 11-run pass on the machine described above and have
+not been re-measured since. Absolute microsecond values are machine-specific and
+drift run-to-run here by up to ~2x, so expect a fresh pass to reproduce the
+*structure* — syscall removal worth ~9x and winning every run, allocation removal
+lost in the noise — rather than the exact absolutes. Ratios are computed **per run
+and then aggregated**, so machine-state drift cancels instead of inflating them:
 
 | Variant | Median | Range over 11 runs | vs. `current` (paired) |
 | --- | ---: | --- | --- |
@@ -299,6 +320,40 @@ allocation"; only the syscall is supported by measurement. Going further,
 `cached-borrow` beats `cached-copy` by just 1.27x (0.66-3.35x) — so a zero-copy
 API is a real but *secondary* win, not the dominant one the withdrawn 36 ns
 figure implied. A block cache is the fix; zero-copy is a refinement on top.
+
+**Why the same read is quoted at three different times.** Three tables in this repo
+measure "a random point read hit" and disagree, so it is worth saying why rather
+than leaving it to look like a contradiction:
+
+| Where | Figure | Bench |
+| --- | ---: | --- |
+| Selected engine results, above | 18.386 µs | `read/point/hit/random` (`benches/engine.rs`) |
+| Comparison table, above | 38.321 µs | `compare/read-point-random` → `stratadb` (`benches/comparison.rs`) |
+| Decomposition table, above | 14.67 µs | `read/path-decomposition` → `current` (`benches/engine.rs`) |
+
+The workload is *not* the variable. All three use 20,000 keys, 256-byte values,
+`SEED = 42`, and the same deterministic shuffle from `benches/support/mod.rs`, and
+all three call the same `Engine::get`. What differs is the **process each one is
+measured in**:
+
+- **18.386 µs vs 38.321 µs** — different bench binaries with different resident
+  fixtures. `compare/read-point-random` builds and holds StrataDB, redb, *and* sled
+  fixtures live in one process (`benches/comparison.rs`), each with its own caches
+  and background threads; sled in particular keeps its own page cache. StrataDB's
+  reads there contend for OS page cache against two other engines' working sets, so
+  more of them miss and reach the disk. `read/point/hit/random` runs in the `engine`
+  binary with one fixture and nothing competing for cache.
+- **18.386 µs vs 14.67 µs** — different aggregation, not a different measurement.
+  14.67 µs is a **median over 11 whole-process runs**; 18.386 µs is a single run's
+  point estimate. The 11-run range for `current` is 10.82-30.73 µs, which contains
+  18.386 µs — the two agree. (The decomposition group also holds every segment in
+  RAM as `Vec<u8>` images for the `cached-*` variants, which warms the same pages
+  `current` reads.)
+
+So the numbers are comparable **within** a table and not **across** tables. The
+only cross-group reasoning done above is the ~11x comparison loss against the
+decomposition's ~9x syscall share, and that is a comparison of *ratios measured
+inside their own groups*, not of absolute microseconds across groups.
 
 **On what `cached-*` is and is not.** Those two variants hold the segments in an
 ordinary `Vec<u8>`, which stands in for a **block cache, not for mmap**. It shares

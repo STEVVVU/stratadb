@@ -3,3 +3,9 @@
 !/.tmp/.gitkeep
 *.wal.tmp
 *.lock
+
+# Bytecode from the benchmark driver in scripts/. Ignored explicitly because
+# `.gitattributes` sets `* text eol=lf`, which would strip CR bytes from a
+# committed .pyc and silently corrupt it.
+__pycache__/
+*.pyc
