@@ -1,9 +1,7 @@
-# StrataDB
+# Embedded Key-Value Store
 
-StrataDB is a crash-safe embedded key-value storage engine written in Rust. It
-uses a checksummed append-only write-ahead log, an in-memory key-to-file-offset
-index, atomic write batches, immutable snapshots, segment rotation, and
-copy-forward compaction.
+A from-scratch embedded key-value database in Rust with durable writes, atomic
+batches, snapshots, crash recovery, segment rotation, and compaction.
 
 The project has no third-party runtime dependencies and does not require
 Docker. It targets Rust 1.89 or newer.
